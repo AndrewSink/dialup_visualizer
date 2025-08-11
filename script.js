@@ -5,6 +5,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // -------- DOM --------
 const container = document.getElementById('canvas-container');
 const playBtn = document.getElementById('playBtn');
+const toggleAxesBtn = document.getElementById('toggleAxesBtn');
 const resetBtn = document.getElementById('resetBtn');
 const fileInput = document.getElementById('fileInput');
 const exportBtn = document.getElementById('exportBtn');
@@ -432,6 +433,17 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 resize();
+
+// Axes toggle
+let axesVisible = true;
+function setAxesVisibility(visible) {
+  axesVisible = visible;
+  axesGroup.visible = visible;
+  if (toggleAxesBtn) toggleAxesBtn.textContent = visible ? 'Hide Axes' : 'Show Axes';
+}
+if (toggleAxesBtn) {
+  toggleAxesBtn.addEventListener('click', () => setAxesVisibility(!axesVisible));
+}
 
 function setPlayButtonState(isPlaying) {
   if (isPlaying) {
