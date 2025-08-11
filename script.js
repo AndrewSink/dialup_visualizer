@@ -670,33 +670,25 @@ function buildOBJFromCaptured() {
     }
   }
 
-  // Base bottom vertices: polyline along back (dense, manifold with back wall), and one row along front
-  const baseBack = new Array(slices);
+  // Bottom grid vertices at y = -baseThickness matching the top grid segmentation
+  // This guarantees shared edges with all side walls for a watertight mesh
+  const indexBottom = Array.from({ length: slices }, () => new Array(bins));
   for (let i = 0; i < slices; i++) {
     const x = x0 + dx * i;
-    baseBack[i] = pushV(x, -baseThickness, z0, baseColor.r, baseColor.g, baseColor.b);
-  }
-  const baseFront = new Array(slices);
-  for (let i = 0; i < slices; i++) {
-    const x = x0 + dx * i;
-    baseFront[i] = pushV(x, -baseThickness, z0 + depth, baseColor.r, baseColor.g, baseColor.b);
+    for (let j = 0; j < bins; j++) {
+      let z;
+      if (j < activeRowsCount) {
+        const t = j / (activeRowsCount - 1);
+        const tExp = Math.pow(t, frequencyExponent);
+        z = z0 + tExp * depth;
+      } else {
+        z = z0 + depth;
+      }
+      indexBottom[i][j] = pushV(x, -baseThickness, z, baseColor.r, baseColor.g, baseColor.b);
+    }
   }
 
-  // Back printable slab: thin wall behind the rear plane
-  const slabZ = z0 - backThickness;
-  const slabTop = new Array(slices);
-  const slabBottom = new Array(slices);
-  for (let i = 0; i < slices; i++) {
-    const x = x0 + dx * i;
-    slabTop[i] = pushV(x, 0, slabZ, baseColor.r, baseColor.g, baseColor.b);
-    slabBottom[i] = pushV(x, -baseThickness, slabZ, baseColor.r, baseColor.g, baseColor.b);
-  }
-  // Back top zero-height edge along z0 to square off rear faces (horizontal shelf start)
-  const backZero = new Array(slices);
-  for (let i = 0; i < slices; i++) {
-    const x = x0 + dx * i;
-    backZero[i] = pushV(x, 0, z0, baseColor.r, baseColor.g, baseColor.b);
-  }
+  // Removed rear slab and zero-height shelf to avoid overlapping/co-planar faces.
 
   // Triangulate top surface with coplanar merge on near-flat regions
   // Build a boolean grid of flat cells
@@ -767,91 +759,39 @@ function buildOBJFromCaptured() {
     emitFace(a0, b1, b0, OUT_FRONT, baseMat);
   }
 
-  // Triangulate bottom surface as a single strip (2*(slices-1) triangles)
+  // Triangulate the bottom surface cell-by-cell to match the top grid
   for (let i = 0; i < slices - 1; i++) {
-    const b0 = baseBack[i];
-    const b1 = baseBack[i + 1];
-    const f0 = baseFront[i];
-    const f1 = baseFront[i + 1];
-    emitFace(b0, b1, f1, OUT_BOTTOM, baseMat);
-    emitFace(b0, f1, f0, OUT_BOTTOM, baseMat);
+    for (let j = 0; j < bins - 1; j++) {
+      const a = indexBottom[i][j];
+      const b = indexBottom[i + 1][j];
+      const c = indexBottom[i + 1][j + 1];
+      const d = indexBottom[i][j + 1];
+      emitFace(a, b, c, OUT_BOTTOM, baseMat);
+      emitFace(a, c, d, OUT_BOTTOM, baseMat);
+    }
   }
 
-  // Side walls: connect top borders to base back/front strips
-  // Back edge z = z0 → vertical wall using baseBack[i]
+  // Side walls: connect top borders to bottom grid
+  // Back edge z = z0 → vertical wall using bottom grid row j=0
   for (let i = 0; i < slices - 1; i++) {
     const aTop = indexTop[i][0];
     const bTop = indexTop[i + 1][0];
-    const aBot = baseBack[i];
-    const bBot = baseBack[i + 1];
+    const aBot = indexBottom[i][0];
+    const bBot = indexBottom[i + 1][0];
     // Consistent diagonal aTop -> bBot
     emitFace(aTop, aBot, bBot, OUT_BACK, baseMat);
     emitFace(aTop, bBot, bTop, OUT_BACK, baseMat);
   }
-  // Square off the back: vertical cap from top edge down to y=0 at z0, then a horizontal shelf from z0 to slabZ at y=0
-  // Vertical cap at z0
-  for (let i = 0; i < slices - 1; i++) {
-    const t0 = indexTop[i][0];
-    const t1 = indexTop[i + 1][0];
-    const e0 = backZero[i];
-    const e1 = backZero[i + 1];
-    emitFace(t0, e0, e1, OUT_BACK, baseMat);
-    emitFace(t0, e1, t1, OUT_BACK, baseMat);
-  }
-  // Horizontal shelf from z0 to slabZ at y=0
-  for (let i = 0; i < slices - 1; i++) {
-    const e0 = backZero[i];
-    const e1 = backZero[i + 1];
-    const s0 = slabTop[i];
-    const s1 = slabTop[i + 1];
-    emitFace(e0, e1, s1, OUT_TOP, baseMat);
-    emitFace(e0, s1, s0, OUT_TOP, baseMat);
-  }
-  // Close slab back rectangle and connect to base
-  for (let i = 0; i < slices - 1; i++) {
-    const st0 = slabTop[i];
-    const st1 = slabTop[i + 1];
-    const sb0 = slabBottom[i];
-    const sb1 = slabBottom[i + 1];
-    emitFace(st0, st1, sb1, OUT_BACK, baseMat);
-    emitFace(st0, sb1, sb0, OUT_BACK, baseMat);
-  }
-  // Join slab bottom with base back edge
-  for (let i = 0; i < slices - 1; i++) {
-    const sb0 = slabBottom[i];
-    const sb1 = slabBottom[i + 1];
-    const bb0 = baseBack[i];
-    const bb1 = baseBack[i + 1];
-    emitFace(bb0, sb0, sb1, OUT_BOTTOM, baseMat);
-    emitFace(bb0, sb1, bb1, OUT_BOTTOM, baseMat);
-  }
+  // Back edge is closed directly by the vertical wall from top edge down to base back edge
+  // (emitted above), avoiding extra overlapping geometry.
 
-  // Close left and right side faces of the squared back shelf (top and bottom)
-  // Left side (x = x0)
-  (function () {
-    const e = backZero[0];
-    const st = slabTop[0];
-    const sb = slabBottom[0];
-    const bb = baseBack[0];
-    // Vertical outer face on the side of the shelf
-    emitFace(e, st, sb, OUT_LEFT, baseMat);
-    emitFace(e, sb, bb, OUT_LEFT, baseMat);
-  })();
-  // Right side (x = x0 + exportWidth)
-  ; (function () {
-    const e = backZero[slices - 1];
-    const st = slabTop[slices - 1];
-    const sb = slabBottom[slices - 1];
-    const bb = baseBack[slices - 1];
-    emitFace(e, sb, st, OUT_RIGHT, baseMat);
-    emitFace(e, bb, sb, OUT_RIGHT, baseMat);
-  })();
-  // Front edge z = z0 + depth → vertical wall using baseFront[i]
+  // Removed side faces for the deleted back shelf.
+  // Front edge z = z0 + depth → vertical wall using bottom grid row j=bins-1
   for (let i = 0; i < slices - 1; i++) {
     const aTop = indexTop[i][bins - 1];
     const bTop = indexTop[i + 1][bins - 1];
-    const aBot = baseFront[i];
-    const bBot = baseFront[i + 1];
+    const aBot = indexBottom[i][bins - 1];
+    const bBot = indexBottom[i + 1][bins - 1];
     // Consistent diagonal aTop -> bBot
     emitFace(aTop, aBot, bBot, OUT_FRONT, baseMat);
     emitFace(aTop, bBot, bTop, OUT_FRONT, baseMat);
@@ -870,8 +810,8 @@ function buildOBJFromCaptured() {
     } else {
       z = z0 + depth;
     }
-    sideBottomLeft[j] = pushV(x0, -baseThickness, z, baseColor.r, baseColor.g, baseColor.b);
-    sideBottomRight[j] = pushV(x0 + exportWidth, -baseThickness, z, baseColor.r, baseColor.g, baseColor.b);
+    sideBottomLeft[j] = indexBottom[0][j];
+    sideBottomRight[j] = indexBottom[slices - 1][j];
   }
   // Left wall
   for (let j = 0; j < bins - 1; j++) {
