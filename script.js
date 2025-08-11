@@ -214,7 +214,167 @@ function referenceColorRamp(t) {
   return { r: last[0], g: last[1], b: last[2] };
 }
 
-// Removed axis annotation sprites
+// -------- Minimal tick marks (Frequency and Amplitude) --------
+// A small axes group that places frequency ticks along Z at y≈0 and
+// amplitude ticks along Y at the back-left corner. Labels are sprites.
+const axesGroup = new THREE.Group();
+scene.add(axesGroup);
+
+function disposeObjectRecursive(object3d) {
+  object3d.traverse((node) => {
+    if (node.geometry) node.geometry.dispose();
+    if (node.material) {
+      // Handle sprite/mesh materials (single or array)
+      const materials = Array.isArray(node.material) ? node.material : [node.material];
+      for (const mat of materials) {
+        if (mat.map) mat.map.dispose();
+        mat.dispose && mat.dispose();
+      }
+    }
+  });
+}
+
+function clearAxesGroup() {
+  while (axesGroup.children.length) {
+    const child = axesGroup.children.pop();
+    disposeObjectRecursive(child);
+  }
+}
+
+function createTextSprite(text, options = {}) {
+  const {
+    fontSize = 64,
+    textColor = '#e5e7eb',
+    padding = 8,
+    shadowColor = 'rgba(0,0,0,0.8)',
+    worldHeight = 6,
+  } = options;
+
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  const font = `${fontSize}px Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial`;
+  context.font = font;
+  const metrics = context.measureText(text);
+  const widthPx = Math.ceil(metrics.width + padding * 2);
+  const heightPx = Math.ceil(fontSize + padding * 2);
+  canvas.width = widthPx;
+  canvas.height = heightPx;
+
+  context.font = font;
+  context.textBaseline = 'middle';
+  context.textAlign = 'left';
+  context.fillStyle = textColor;
+  context.shadowColor = shadowColor;
+  context.shadowBlur = 4;
+  context.fillText(text, padding, heightPx / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+
+  const spriteWorldHeight = worldHeight;
+  const spriteWorldWidth = (widthPx / heightPx) * spriteWorldHeight;
+  sprite.scale.set(spriteWorldWidth, spriteWorldHeight, 1);
+  return sprite;
+}
+
+function formatHzLabel(hz) {
+  if (hz >= 1000) {
+    const kilo = hz / 1000;
+    return (Math.abs(kilo - Math.round(kilo)) < 1e-6) ? `${Math.round(kilo)}k` : `${kilo.toFixed(1)}k`;
+  }
+  return `${Math.round(hz)}`;
+}
+
+function buildAxesAndTicks() {
+  clearAxesGroup();
+
+  const leftX = -width / 2 - 2; // just left of the surface
+  const backZ = zMin;
+  const frontActiveZ = zRowPositions[Math.max(0, activeRows - 1)];
+  const amplitudeMaxY = depth * heightScale;
+
+  const lineMaterial = new THREE.LineBasicMaterial({ color: 0x9ca3af });
+
+  // Amplitude (Y) axis line at back-left corner
+  const yAxisGeometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(leftX, 0, backZ),
+    new THREE.Vector3(leftX, amplitudeMaxY, backZ),
+  ]);
+  axesGroup.add(new THREE.Line(yAxisGeometry, lineMaterial));
+
+  // Frequency (Z) axis line along base at y=0
+  const zAxisGeometry = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(leftX, 0, backZ),
+    new THREE.Vector3(leftX, 0, frontActiveZ),
+  ]);
+  axesGroup.add(new THREE.Line(zAxisGeometry, lineMaterial));
+
+  // Frequency tick marks and labels
+  const nyquistHz = audioContext.sampleRate / 2;
+  const desiredFreqHz = [50, 100, 200, 500, 1000, 2000, 5000, 10000, 15000];
+  const freqTickPoints = [];
+  for (const hz of desiredFreqHz) {
+    if (hz <= 0 || hz > nyquistHz) continue;
+    // Convert target Hz -> downsampled row index -> Z position
+    const binIndex = (hz / nyquistHz) * freqBinCount; // 0..freqBinCount
+    const rowIndex = Math.round(binIndex / sliceStride);
+    if (rowIndex < 0 || rowIndex >= activeRows) continue; // only in active band
+    const zAtRow = zRowPositions[rowIndex];
+    freqTickPoints.push(new THREE.Vector3(leftX - 1.0, 0, zAtRow));
+    freqTickPoints.push(new THREE.Vector3(leftX, 0, zAtRow));
+
+    const label = createTextSprite(formatHzLabel(hz), { worldHeight: 5 });
+    label.position.set(leftX - 1.25, 0.01, zAtRow);
+    // Anchor label on its left-center so numbers sit just left of the tick
+    label.center.set(0, 0.5);
+    label.renderOrder = 2;
+    axesGroup.add(label);
+  }
+  if (freqTickPoints.length) {
+    const freqTicksGeometry = new THREE.BufferGeometry().setFromPoints(freqTickPoints);
+    axesGroup.add(new THREE.LineSegments(freqTicksGeometry, lineMaterial));
+  }
+
+  // Amplitude tick marks and labels (approximate dB scale 0..80)
+  const amplitudeDbTicks = [0, 20, 40, 60, 80];
+  const ampTickPoints = [];
+  for (const db of amplitudeDbTicks) {
+    const unit = Math.max(0, Math.min(1, db / 80));
+    const yAtDb = unit * amplitudeMaxY;
+    ampTickPoints.push(new THREE.Vector3(leftX, yAtDb, backZ));
+    ampTickPoints.push(new THREE.Vector3(leftX + 1.2, yAtDb, backZ));
+
+    const label = createTextSprite(`${db}`, { worldHeight: 5 });
+    label.position.set(leftX - 0.3, yAtDb, backZ);
+    // Anchor to right-middle so text hugs the axis
+    label.center.set(1, 0.5);
+    label.renderOrder = 2;
+    axesGroup.add(label);
+  }
+  if (ampTickPoints.length) {
+    const ampTicksGeometry = new THREE.BufferGeometry().setFromPoints(ampTickPoints);
+    axesGroup.add(new THREE.LineSegments(ampTicksGeometry, lineMaterial));
+  }
+
+  // Axis titles
+  const freqTitle = createTextSprite('Frequency (Hz)', { worldHeight: 5.5 });
+  freqTitle.position.set(leftX - 3.2, 0.01, (backZ + frontActiveZ) / 2);
+  freqTitle.center.set(0.5, 0.5);
+  freqTitle.renderOrder = 2;
+  axesGroup.add(freqTitle);
+
+  const ampTitle = createTextSprite('Amplitude (dB)', { worldHeight: 5.5 });
+  ampTitle.position.set(leftX - 3.2, amplitudeMaxY, backZ);
+  ampTitle.center.set(0.5, 0);
+  ampTitle.renderOrder = 2;
+  axesGroup.add(ampTitle);
+}
+
+// Build initial axes now that geometry mapping is known
+buildAxesAndTicks();
 
 // -------- Animation loop --------
 let isRendering = true;
@@ -242,12 +402,12 @@ resize();
 function setPlayButtonState(isPlaying) {
   if (isPlaying) {
     playBtn.textContent = 'Pause';
-    playBtn.classList.remove('bg-emerald-600','hover:bg-emerald-500');
-    playBtn.classList.add('bg-yellow-500','hover:bg-yellow-400');
+    playBtn.classList.remove('bg-emerald-600', 'hover:bg-emerald-500');
+    playBtn.classList.add('bg-yellow-500', 'hover:bg-yellow-400');
   } else {
     playBtn.textContent = 'Play';
-    playBtn.classList.remove('bg-yellow-500','hover:bg-yellow-400');
-    playBtn.classList.add('bg-emerald-600','hover:bg-emerald-500');
+    playBtn.classList.remove('bg-yellow-500', 'hover:bg-yellow-400');
+    playBtn.classList.add('bg-emerald-600', 'hover:bg-emerald-500');
   }
 }
 
@@ -622,7 +782,7 @@ function buildOBJFromCaptured() {
 
   // Close left and right side faces of the squared back shelf (top and bottom)
   // Left side (x = x0)
-  (function() {
+  (function () {
     const e = backZero[0];
     const st = slabTop[0];
     const sb = slabBottom[0];
@@ -632,7 +792,7 @@ function buildOBJFromCaptured() {
     emitFace(e, sb, bb, OUT_LEFT, baseMat);
   })();
   // Right side (x = x0 + exportWidth)
-  ;(function() {
+  ; (function () {
     const e = backZero[slices - 1];
     const st = slabTop[slices - 1];
     const sb = slabBottom[slices - 1];
@@ -705,7 +865,7 @@ function buildOBJFromCaptured() {
   // Build MTL text from used materials
   const mtlLines = ['# Materials'];
   // Ensure baseMat defined
-  const baseKey = `${Math.round(baseColor.r*255)}_${Math.round(baseColor.g*255)}_${Math.round(baseColor.b*255)}`;
+  const baseKey = `${Math.round(baseColor.r * 255)}_${Math.round(baseColor.g * 255)}_${Math.round(baseColor.b * 255)}`;
   if (!materials.has(baseKey)) materials.set(baseKey, { name: baseMat, r: baseColor.r, g: baseColor.g, b: baseColor.b });
   for (const { name, r, g, b } of materials.values()) {
     mtlLines.push(`newmtl ${name}`);
@@ -750,7 +910,7 @@ function resetVisualization() {
 // Cleanup on hot reload
 window.addEventListener('beforeunload', () => {
   isRendering = false;
-  try { audioEl.pause(); } catch {}
+  try { audioEl.pause(); } catch { }
 });
 
 
