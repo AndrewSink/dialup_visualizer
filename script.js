@@ -291,7 +291,7 @@ function formatHzLabel(hz) {
 function buildAxesAndTicks() {
   clearAxesGroup();
 
-  const leftX = -width / 2 - 2; // just left of the surface
+  const axisX = width / 2 + 2; // just right of the surface
   const backZ = zMin;
   const frontActiveZ = zRowPositions[Math.max(0, activeRows - 1)];
   const amplitudeMaxY = depth * heightScale;
@@ -300,15 +300,15 @@ function buildAxesAndTicks() {
 
   // Amplitude (Y) axis line at back-left corner
   const yAxisGeometry = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(leftX, 0, backZ),
-    new THREE.Vector3(leftX, amplitudeMaxY, backZ),
+    new THREE.Vector3(axisX, 0, backZ),
+    new THREE.Vector3(axisX, amplitudeMaxY, backZ),
   ]);
   axesGroup.add(new THREE.Line(yAxisGeometry, lineMaterial));
 
   // Frequency (Z) axis line along base at y=0
   const zAxisGeometry = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(leftX, 0, backZ),
-    new THREE.Vector3(leftX, 0, frontActiveZ),
+    new THREE.Vector3(axisX, 0, backZ),
+    new THREE.Vector3(axisX, 0, frontActiveZ),
   ]);
   axesGroup.add(new THREE.Line(zAxisGeometry, lineMaterial));
 
@@ -323,12 +323,12 @@ function buildAxesAndTicks() {
     const rowIndex = Math.round(binIndex / sliceStride);
     if (rowIndex < 0 || rowIndex >= activeRows) continue; // only in active band
     const zAtRow = zRowPositions[rowIndex];
-    freqTickPoints.push(new THREE.Vector3(leftX - 1.0, 0, zAtRow));
-    freqTickPoints.push(new THREE.Vector3(leftX, 0, zAtRow));
+    freqTickPoints.push(new THREE.Vector3(axisX, 0, zAtRow));
+    freqTickPoints.push(new THREE.Vector3(axisX + 1.0, 0, zAtRow));
 
     const label = createTextSprite(formatHzLabel(hz), { worldHeight: 5 });
-    label.position.set(leftX - 1.25, 0.01, zAtRow);
-    // Anchor label on its left-center so numbers sit just left of the tick
+    label.position.set(axisX + 1.25, 0.01, zAtRow);
+    // Anchor so text sits to the right of the tick
     label.center.set(0, 0.5);
     label.renderOrder = 2;
     axesGroup.add(label);
@@ -344,13 +344,13 @@ function buildAxesAndTicks() {
   for (const db of amplitudeDbTicks) {
     const unit = Math.max(0, Math.min(1, db / 80));
     const yAtDb = unit * amplitudeMaxY;
-    ampTickPoints.push(new THREE.Vector3(leftX, yAtDb, backZ));
-    ampTickPoints.push(new THREE.Vector3(leftX + 1.2, yAtDb, backZ));
+    ampTickPoints.push(new THREE.Vector3(axisX, yAtDb, backZ));
+    ampTickPoints.push(new THREE.Vector3(axisX + 1.2, yAtDb, backZ));
 
     const label = createTextSprite(`${db}`, { worldHeight: 5 });
-    label.position.set(leftX - 0.3, yAtDb, backZ);
-    // Anchor to right-middle so text hugs the axis
-    label.center.set(1, 0.5);
+    label.position.set(axisX + 0.3, yAtDb, backZ);
+    // Anchor to left-middle so text hugs the axis
+    label.center.set(0, 0.5);
     label.renderOrder = 2;
     axesGroup.add(label);
   }
@@ -361,13 +361,13 @@ function buildAxesAndTicks() {
 
   // Axis titles
   const freqTitle = createTextSprite('Frequency (Hz)', { worldHeight: 5.5 });
-  freqTitle.position.set(leftX - 3.2, 0.01, (backZ + frontActiveZ) / 2);
+  freqTitle.position.set(axisX + 3.2, 0.01, (backZ + frontActiveZ) / 2);
   freqTitle.center.set(0.5, 0.5);
   freqTitle.renderOrder = 2;
   axesGroup.add(freqTitle);
 
   const ampTitle = createTextSprite('Amplitude (dB)', { worldHeight: 5.5 });
-  ampTitle.position.set(leftX - 3.2, amplitudeMaxY, backZ);
+  ampTitle.position.set(axisX + 3.2, amplitudeMaxY, backZ);
   ampTitle.center.set(0.5, 0);
   ampTitle.renderOrder = 2;
   axesGroup.add(ampTitle);
@@ -375,6 +375,34 @@ function buildAxesAndTicks() {
 
 // Build initial axes now that geometry mapping is known
 buildAxesAndTicks();
+
+// Place the camera so the view centers between the axes (left) and the surface (center),
+// backed up and slightly orbiting to the right similar to the reference angle.
+function positionCameraOverview() {
+  const rightAxisX = width / 2 + 2; // axes now on right
+  const startX = width / 2; // right edge where new slices appear
+  // Midpoint between the surface center (0) and the right axes/wave start
+  const targetX = (0 + rightAxisX) / 2;
+  const targetY = depth * heightScale * 0.35;
+  const targetZ = 0;
+
+  // Set the look target first
+  controls.target.set(targetX, targetY, targetZ);
+
+  // Back the camera off and orbit a bit to the right of the target
+  const amplitudeMaxY = depth * heightScale;
+  const dx = width * 0.25;  // slight right of target (axes are on right already)
+  const dy = amplitudeMaxY * 1.6;  // above target
+  const dz = width * 0.65;  // forward from target
+  camera.position.set(targetX + dx, targetY + dy, targetZ + dz);
+  controls.update();
+  controls.saveState && controls.saveState();
+}
+
+positionCameraOverview();
+
+// Ensure the surface is visible before audio plays
+resetVisualization();
 
 // -------- Animation loop --------
 let isRendering = true;
@@ -390,11 +418,17 @@ function animate() {
 animate();
 
 // -------- Events --------
+let didSetInitialView = false;
 function resize() {
   const { clientWidth, clientHeight } = container;
   renderer.setSize(clientWidth, clientHeight);
   camera.aspect = clientWidth / clientHeight;
   camera.updateProjectionMatrix();
+  // Ensure the camera is set to the intended overview once after layout is known
+  if (!didSetInitialView && typeof positionCameraOverview === 'function') {
+    positionCameraOverview();
+    didSetInitialView = true;
+  }
 }
 window.addEventListener('resize', resize);
 resize();
@@ -895,7 +929,7 @@ function downloadTextAsFile(filename, text) {
 // Clear the current visualization back to a flat plane and base color
 function resetVisualization() {
   const posArray = geometry.attributes.position.array;
-  const baseColor = referenceColorRamp(0);
+  const baseColor = { r: 0.15, g: 0.15, b: 0.15 }; // neutral gray, not red
   for (let i = 0; i < positionAttr.count; i++) {
     posArray[i * 3 + 1] = 0; // y
     const ci = i * 3;
