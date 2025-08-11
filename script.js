@@ -69,18 +69,30 @@ const activeFrequencyFraction = 0.75; // show first ~75% of rows; collapse the r
 const frequencyExponent = 0.65; // <1 spreads low/mid frequencies
 const noiseFloor = 0.03; // ignore very small magnitudes
 
-const numSlices = 1024; // extended history depth for longer visible timeline
-const width = 400; // x extent (time)
+const numSlicesInitial = 1024; // initial capacity
+const width = 400; // initial visual width used to derive slice spacing
 const depth = 80; // z extent (frequency)
 const heightScale = 0.6; // amplitude scale
 
-let geometry = new THREE.PlaneGeometry(width, depth, numSlices - 1, pointsPerSlice - 1);
-geometry.rotateX(-Math.PI / 2); // make Y up
+// Constant spacing along X so model can grow indefinitely while keeping scale
+const sliceSpacing = width / (numSlicesInitial - 1);
+let capacity = numSlicesInitial; // current columns capacity
+let currentSliceIndex = 0; // next X index to fill
 
-// Starting positions: x from -width/2 .. +width/2, z from -depth/2 .. +depth/2
-const positionAttr = geometry.attributes.position;
+function createSurfaceGeometry(columnCapacity) {
+  const g = new THREE.PlaneGeometry(sliceSpacing * (columnCapacity - 1), depth, columnCapacity - 1, pointsPerSlice - 1);
+  g.rotateX(-Math.PI / 2);
+  // Anchor the left edge at x = 0 so growth always extends to the right
+  g.translate((sliceSpacing * (columnCapacity - 1)) / 2, 0, 0);
+  return g;
+}
+
+let geometry = createSurfaceGeometry(capacity);
+
+// Starting positions: x from -W/2 .. +W/2, z per non-linear mapping
+let positionAttr = geometry.attributes.position;
 // Custom color per vertex for a heat map effect
-const colors = new Float32Array(positionAttr.count * 3);
+let colors = new Float32Array(positionAttr.count * 3);
 geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
 
 const material = new THREE.MeshLambertMaterial({
@@ -109,17 +121,21 @@ for (let z = 0; z < pointsPerSlice; z++) {
     zRowPositions[z] = zMax; // collapse unused high frequencies
   }
 }
-// Apply to initial geometry Z coordinates
-const posArrayInit = positionAttr.array;
-for (let z = 0; z < pointsPerSlice; z++) {
-  const rowStart = z * numSlices;
-  const zVal = zRowPositions[z];
-  for (let x = 0; x < numSlices; x++) {
-    const i3 = (rowStart + x) * 3;
-    posArrayInit[i3 + 2] = zVal;
+// Apply Z coordinates for the current geometry based on zRowPositions
+function applyZRowsToGeometry(geo, columnCapacity) {
+  const posAttr = geo.attributes.position;
+  const arr = posAttr.array;
+  for (let z = 0; z < pointsPerSlice; z++) {
+    const rowStart = z * columnCapacity;
+    const zVal = zRowPositions[z];
+    for (let x = 0; x < columnCapacity; x++) {
+      const i3 = (rowStart + x) * 3;
+      arr[i3 + 2] = zVal;
+    }
   }
+  posAttr.needsUpdate = true;
 }
-positionAttr.needsUpdate = true;
+applyZRowsToGeometry(geometry, capacity);
 
 // Maintain a continuous scroll by shifting historic columns left
 let isCapturing = false;
@@ -127,6 +143,46 @@ let hasEnded = false;
 const capturedSlices = []; // array of Float32Array(length: pointsPerSlice)
 const baseThickness = 4; // export base thickness (units ~ same as scene)
 const backThickness = 6; // small back slab thickness along -Z for printability
+
+function expandGeometry(newCapacity) {
+  const oldGeometry = geometry;
+  const oldPos = positionAttr;
+  const oldColors = colors;
+  const oldCapacity = capacity;
+
+  const newGeo = createSurfaceGeometry(newCapacity);
+  applyZRowsToGeometry(newGeo, newCapacity);
+  let newPos = newGeo.attributes.position;
+  let newColors = new Float32Array(newPos.count * 3);
+  newGeo.setAttribute('color', new THREE.BufferAttribute(newColors, 3));
+
+  // Copy existing Y values and vertex colors into the new geometry
+  for (let z = 0; z < pointsPerSlice; z++) {
+    for (let x = 0; x < Math.min(currentSliceIndex, newCapacity); x++) {
+      const oldIdx = z * oldCapacity + x;
+      const newIdx = z * newCapacity + x;
+      newPos.setY(newIdx, oldPos.getY(oldIdx));
+      const oc = oldIdx * 3;
+      const nc = newIdx * 3;
+      newColors[nc + 0] = oldColors[oc + 0];
+      newColors[nc + 1] = oldColors[oc + 1];
+      newColors[nc + 2] = oldColors[oc + 2];
+    }
+  }
+  // Dispose old geometry to free GPU memory
+  oldGeometry.dispose();
+  // Swap in the new geometry
+  geometry = newGeo;
+  surface.geometry = geometry;
+  positionAttr = geometry.attributes.position;
+  colors = newColors;
+  capacity = newCapacity;
+  positionAttr.needsUpdate = true;
+  geometry.attributes.color.needsUpdate = true;
+
+  // Rebuild axes at the new right edge
+  buildAxesAndTicks();
+}
 
 function updateSurfaceFromFrequencies() {
   analyser.getByteFrequencyData(freqData);
@@ -147,38 +203,25 @@ function updateSurfaceFromFrequencies() {
     capturedSlices.push(newSlice.slice());
   }
 
-  // For each z-row (frequency), left-shift all columns by one and append new slice at the end
-  const rowSize = numSlices; // vertices along X
-  const posArray = positionAttr.array;
-  for (let z = 0; z < pointsPerSlice; z++) {
-    const rowStartVertex = z * rowSize;
-    // shift left (copy from x+1 -> x)
-    for (let x = 0; x < rowSize - 1; x++) {
-      const fromV = rowStartVertex + x + 1;
-      const toV = rowStartVertex + x;
-      // y component is index *3 + 1
-      posArray[toV * 3 + 1] = posArray[fromV * 3 + 1];
-      const fromC = fromV * 3;
-      const toC = toV * 3;
-      colors[toC + 0] = colors[fromC + 0];
-      colors[toC + 1] = colors[fromC + 1];
-      colors[toC + 2] = colors[fromC + 2];
-    }
-
-    // insert newest at the rightmost column
-    const lastV = rowStartVertex + rowSize - 1;
-    const y = newSlice[z] * depth * heightScale;
-    posArray[lastV * 3 + 1] = y;
-
-    // Color mapping: reference-style ramp (red/yellow at low, blue at high)
-    const t = newSlice[z];
-    const color = referenceColorRamp(t);
-    const lastC = lastV * 3;
-    colors[lastC + 0] = color.r;
-    colors[lastC + 1] = color.g;
-    colors[lastC + 2] = color.b;
+  // Grow geometry if needed
+  if (currentSliceIndex >= capacity) {
+    const nextCapacity = Math.ceil(capacity * 1.6);
+    expandGeometry(nextCapacity);
   }
 
+  // For each z-row (frequency), write this slice at the current column
+  for (let z = 0; z < pointsPerSlice; z++) {
+    const vIndex = z * capacity + currentSliceIndex;
+    const y = newSlice[z] * depth * heightScale;
+    positionAttr.setY(vIndex, y);
+    const color = referenceColorRamp(newSlice[z]);
+    const cIdx = vIndex * 3;
+    colors[cIdx + 0] = color.r;
+    colors[cIdx + 1] = color.g;
+    colors[cIdx + 2] = color.b;
+  }
+
+  currentSliceIndex++;
   positionAttr.needsUpdate = true;
   geometry.attributes.color.needsUpdate = true;
 }
@@ -292,7 +335,8 @@ function formatHzLabel(hz) {
 function buildAxesAndTicks() {
   clearAxesGroup();
 
-  const axisX = width / 2 + 2; // just right of the surface
+  // Place axes on the left side of the mesh at a fixed world X (slightly left of x=0)
+  const axisX = -2; // just left of surface's anchored left edge (x=0)
   const backZ = zMin;
   const frontActiveZ = zRowPositions[Math.max(0, activeRows - 1)];
   const amplitudeMaxY = depth * heightScale;
@@ -324,13 +368,13 @@ function buildAxesAndTicks() {
     const rowIndex = Math.round(binIndex / sliceStride);
     if (rowIndex < 0 || rowIndex >= activeRows) continue; // only in active band
     const zAtRow = zRowPositions[rowIndex];
+    freqTickPoints.push(new THREE.Vector3(axisX - 1.0, 0, zAtRow));
     freqTickPoints.push(new THREE.Vector3(axisX, 0, zAtRow));
-    freqTickPoints.push(new THREE.Vector3(axisX + 1.0, 0, zAtRow));
 
     const label = createTextSprite(formatHzLabel(hz), { worldHeight: 5 });
-    label.position.set(axisX + 1.25, 0.01, zAtRow);
-    // Anchor so text sits to the right of the tick
-    label.center.set(0, 0.5);
+    label.position.set(axisX - 1.25, 0.01, zAtRow);
+    // Anchor so text sits to the left of the tick (right-aligned)
+    label.center.set(1, 0.5);
     label.renderOrder = 2;
     axesGroup.add(label);
   }
@@ -345,13 +389,13 @@ function buildAxesAndTicks() {
   for (const db of amplitudeDbTicks) {
     const unit = Math.max(0, Math.min(1, db / 80));
     const yAtDb = unit * amplitudeMaxY;
+    ampTickPoints.push(new THREE.Vector3(axisX - 1.2, yAtDb, backZ));
     ampTickPoints.push(new THREE.Vector3(axisX, yAtDb, backZ));
-    ampTickPoints.push(new THREE.Vector3(axisX + 1.2, yAtDb, backZ));
 
     const label = createTextSprite(`${db}`, { worldHeight: 5 });
-    label.position.set(axisX + 0.3, yAtDb, backZ);
-    // Anchor to left-middle so text hugs the axis
-    label.center.set(0, 0.5);
+    label.position.set(axisX - 0.3, yAtDb, backZ);
+    // Anchor to right-middle so text hugs the axis from the left side
+    label.center.set(1, 0.5);
     label.renderOrder = 2;
     axesGroup.add(label);
   }
@@ -362,13 +406,13 @@ function buildAxesAndTicks() {
 
   // Axis titles
   const freqTitle = createTextSprite('Frequency (Hz)', { worldHeight: 5.5 });
-  freqTitle.position.set(axisX + 3.2, 0.01, (backZ + frontActiveZ) / 2);
+  freqTitle.position.set(axisX - 3.2, 0.01, (backZ + frontActiveZ) / 2);
   freqTitle.center.set(0.5, 0.5);
   freqTitle.renderOrder = 2;
   axesGroup.add(freqTitle);
 
   const ampTitle = createTextSprite('Amplitude (dB)', { worldHeight: 5.5 });
-  ampTitle.position.set(axisX + 3.2, amplitudeMaxY, backZ);
+  ampTitle.position.set(axisX - 3.2, amplitudeMaxY, backZ);
   ampTitle.center.set(0.5, 0);
   ampTitle.renderOrder = 2;
   axesGroup.add(ampTitle);
@@ -380,10 +424,8 @@ buildAxesAndTicks();
 // Place the camera so the view centers between the axes (left) and the surface (center),
 // backed up and slightly orbiting to the right similar to the reference angle.
 function positionCameraOverview() {
-  const rightAxisX = width / 2 + 2; // axes now on right
-  const startX = width / 2; // right edge where new slices appear
-  // Midpoint between the surface center (0) and the right axes/wave start
-  const targetX = (0 + rightAxisX) / 2;
+  // Axes are on the left near x=0; model grows to the right.
+  const targetX = (0 + sliceSpacing * 40) / 2; // slight bias into the surface
   const targetY = depth * heightScale * 0.35;
   const targetZ = 0;
 
@@ -392,9 +434,9 @@ function positionCameraOverview() {
 
   // Back the camera off and orbit a bit to the right of the target
   const amplitudeMaxY = depth * heightScale;
-  const dx = width * 0.25;  // slight right of target (axes are on right already)
+  const dx = sliceSpacing * 120;  // right of target
   const dy = amplitudeMaxY * 1.6;  // above target
-  const dz = width * 0.65;  // forward from target
+  const dz = sliceSpacing * 300;  // forward from target
   camera.position.set(targetX + dx, targetY + dy, targetZ + dz);
   controls.update();
   controls.saveState && controls.saveState();
@@ -404,6 +446,23 @@ positionCameraOverview();
 
 // Ensure the surface is visible before audio plays
 resetVisualization();
+
+// Zooms out to fit the full model width while preserving the current angle.
+function frameWholeModel() {
+  const slices = Math.max(currentSliceIndex, capturedSlices.length);
+  const totalWidth = Math.max(1, slices - 1) * sliceSpacing;
+  const targetX = totalWidth * 0.55; // bias a bit into the model
+  const targetY = depth * heightScale * 0.35;
+  const targetZ = 0;
+  controls.target.set(targetX, targetY, targetZ);
+
+  const amplitudeMaxY = depth * heightScale;
+  const dz = Math.max(sliceSpacing * 300, totalWidth * 1.1);
+  const dx = sliceSpacing * 140; // small right offset
+  const dy = amplitudeMaxY * 1.7;
+  camera.position.set(targetX + dx, targetY + dy, targetZ + dz);
+  controls.update();
+}
 
 // -------- Animation loop --------
 let isRendering = true;
@@ -512,7 +571,8 @@ audioEl.addEventListener('ended', () => {
   hasEnded = true;
   isCapturing = false;
   finalizeModelGeometry();
-  // keep export enabled for partial or full
+  // back the camera up a bit so the entire model is in view
+  frameWholeModel();
   setPlayButtonState(false);
 });
 
@@ -531,10 +591,11 @@ exportBtn.addEventListener('click', () => {
 function finalizeModelGeometry() {
   const slices = capturedSlices.length;
   if (slices < 2) return;
-  const dx = width / (numSlices - 1);
-  const finalWidth = dx * (slices - 1);
+  const finalWidth = sliceSpacing * (slices - 1);
   const newGeo = new THREE.PlaneGeometry(finalWidth, depth, slices - 1, pointsPerSlice - 1);
   newGeo.rotateX(-Math.PI / 2);
+  // Anchor left edge at x=0 so the model does not shift on completion
+  newGeo.translate(finalWidth / 2, 0, 0);
 
   const pos = newGeo.attributes.position;
   const col = new Float32Array(pos.count * 3);
@@ -587,7 +648,7 @@ function buildOBJFromCaptured() {
   const activeRowsCount = Math.max(2, Math.floor(pointsPerSlice * activeFrequencyFraction));
   // Use only the active frequency band plus one front boundary row to avoid degenerate cells
   const bins = activeRowsCount + 1;
-  const dx = width / (numSlices - 1);
+  const dx = sliceSpacing;
   const dz = depth / (bins - 1);
   const exportWidth = dx * (slices - 1);
   const x0 = -exportWidth / 2;
