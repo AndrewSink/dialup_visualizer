@@ -1,4 +1,4 @@
-Inspired to take a crack at this from [Joel Telling's Tweet](https://x.com/joeltelling/status/1954712596067885058).
+Inspired to take a crack at this idea from [Joel Telling's Tweet](https://x.com/joeltelling/status/1954712596067885058).
 
 Try it out here: https://andrewsink.github.io/dialup_visualizer/
 
