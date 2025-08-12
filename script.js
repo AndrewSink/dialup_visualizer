@@ -52,7 +52,7 @@ camera.position.set(90, 55, 120);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.minDistance = 30;
-controls.maxDistance = 400;
+controls.maxDistance = 4000;
 controls.maxPolarAngle = Math.PI * 0.49;
 // Mouse mappings: middle to pan, right to orbit
 controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
