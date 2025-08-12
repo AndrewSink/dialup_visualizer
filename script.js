@@ -16,12 +16,20 @@ const audioContext = new (window.AudioContext || window.webkitAudioContext)();
 const audioSource = audioContext.createMediaElementSource(audioEl);
 const analyser = audioContext.createAnalyser();
 analyser.fftSize = 1024; // 512 freq bins
-analyser.smoothingTimeConstant = 0.85;
+const defaultSmoothing = 0.85;
+analyser.smoothingTimeConstant = defaultSmoothing;
 audioSource.connect(analyser);
 analyser.connect(audioContext.destination);
 
 const freqBinCount = analyser.frequencyBinCount; // 512
 const freqData = new Uint8Array(freqBinCount);
+
+function flushAnalyser() {
+  // Temporarily disable smoothing and pull a few frames to drop residual state
+  analyser.smoothingTimeConstant = 0;
+  for (let i = 0; i < 4; i++) analyser.getByteFrequencyData(freqData);
+  freqData.fill(0);
+}
 
 // -------- 3D Scene --------
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -192,7 +200,7 @@ function updateSurfaceFromFrequencies() {
   for (let i = 0; i < pointsPerSlice; i++) {
     const srcIndex = Math.min(freqBinCount - 1, i * sliceStride);
     let bin = freqData[srcIndex] / 255;
-    if (bin < noiseFloor && i >= activeRows) bin = 0; // keep highs zero unless strong
+    if (bin < noiseFloor) bin = 0; // enforce zero floor everywhere during rebuilds
     // Slight emphasis on mid-highs to echo the modem's chirps
     const emphasized = Math.pow(bin, 1.2);
     newSlice[i] = emphasized;
@@ -516,6 +524,11 @@ function setPlayButtonState(isPlaying) {
   }
 }
 
+function setExportAvailability(enabled) {
+  if (!exportBtn) return;
+  exportBtn.disabled = !enabled;
+}
+
 playBtn.addEventListener('click', async () => {
   if (audioEl.paused) {
     if (audioContext.state === 'suspended') await audioContext.resume();
@@ -526,17 +539,23 @@ playBtn.addEventListener('click', async () => {
     audioEl.pause();
     isCapturing = false;
     setPlayButtonState(false);
+    // keep export availability as-is
   }
 });
 
 resetBtn.addEventListener('click', () => {
   audioEl.pause();
   audioEl.currentTime = 0;
+  // Ensure browser seeks to start for both default and uploaded sources
+  try { audioEl.load(); } catch { }
+  // Clear analyser buffers to avoid a spike on the first frame
+  flushAnalyser();
   setPlayButtonState(false);
   hasEnded = false;
   isCapturing = false;
   capturedSlices.length = 0;
-  resetVisualization();
+  hardResetVisualization();
+  setExportAvailability(false);
 });
 
 fileInput.addEventListener('change', async (e) => {
@@ -544,9 +563,17 @@ fileInput.addEventListener('change', async (e) => {
   if (!file) return;
   const url = URL.createObjectURL(file);
   audioEl.src = url;
+  // Fresh start for a newly uploaded file
+  hasEnded = false;
+  isCapturing = false;
+  capturedSlices.length = 0;
+  hardResetVisualization();
+  flushAnalyser();
+  try { audioEl.currentTime = 0; audioEl.load(); } catch { }
   if (audioContext.state === 'suspended') await audioContext.resume();
   audioEl.play();
   isCapturing = true;
+  setExportAvailability(false);
 });
 
 // Drag & drop support
@@ -557,14 +584,24 @@ window.addEventListener('drop', (e) => {
   if (!file) return;
   const url = URL.createObjectURL(file);
   audioEl.src = url;
+  // Fresh start for a newly dropped file
+  hasEnded = false;
+  isCapturing = false;
+  capturedSlices.length = 0;
+  hardResetVisualization();
+  flushAnalyser();
+  try { audioEl.currentTime = 0; audioEl.load(); } catch { }
   audioEl.play();
   isCapturing = true;
+  setExportAvailability(false);
 });
 
 // Auto-start visualization when audio starts
 audioEl.addEventListener('play', () => {
   if (audioContext.state === 'suspended') audioContext.resume();
   setPlayButtonState(true);
+  // Enable export once at least one slice lands
+  setExportAvailability(true);
 });
 
 audioEl.addEventListener('ended', () => {
@@ -952,6 +989,25 @@ function resetVisualization() {
   }
   positionAttr.needsUpdate = true;
   geometry.attributes.color.needsUpdate = true;
+  // Also clear any residual captured slices to avoid pre-populating export
+  capturedSlices.length = 0;
+}
+
+// Full reset: re-create the surface to initial capacity and clear indices
+function hardResetVisualization() {
+  currentSliceIndex = 0;
+  capacity = numSlicesInitial;
+  if (surface.geometry) surface.geometry.dispose();
+  geometry = createSurfaceGeometry(capacity);
+  applyZRowsToGeometry(geometry, capacity);
+  positionAttr = geometry.attributes.position;
+  colors = new Float32Array(positionAttr.count * 3);
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  surface.geometry = geometry;
+  resetVisualization();
+  buildAxesAndTicks();
+  // Optionally recenters the view near the beginning
+  positionCameraOverview();
 }
 
 // Cleanup on hot reload
